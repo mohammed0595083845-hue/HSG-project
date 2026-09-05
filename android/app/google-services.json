@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "413760076164",
+    "project_id": "hsg-app-87f84",
+    "storage_bucket": "hsg-app-87f84.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:413760076164:android:d6546a147ac9933ab305d1",
+        "android_client_info": {
+          "package_name": "com.example.mapping"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD6pzwhMB10WHURIKk8AbzcNPouJYoSctw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
