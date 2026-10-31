@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../theme/app_colors.dart';
+import '../data/auth_service.dart';
+import '../data/category_repository.dart';
 import '../data/service_repository.dart';
 import '../models/service_model.dart';
+import '../widgets/status_chip.dart';
 import 'add_service_screen.dart';
 import 'report_service_screen.dart';
 import 'login_screen.dart';
@@ -18,43 +20,38 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
-
-  // إحداثيات مركز قطاع غزة لفتح الخريطة عليها مباشرة
   final LatLng _gazaCenterPosition = const LatLng(31.4424, 34.3856);
 
-  // بناء العلامات (Markers) للخدمات في غزة
-  // كل خدمة بتاخد أيقونة ولون نوعها الخاص (s.type.icon / s.type.color)
-  // بنفس الأيقونات المستخدمة بشاشة إضافة خدمة، بدل أيقونة موحدة لكل الأنواع
+  // الخدمات غير الموافق عليها (Pending) بتظهر باهتة لصاحبها فقط
   List<Marker> _buildMarkers(List<ServiceModel> services) {
     return services.map((s) {
+      final category = CategoryRepository.instance.byId(s.categoryId);
+      final isPending = s.status != ServiceStatus.approved;
       return Marker(
-        point: LatLng(s.latitude, s.longitude),
+        point: LatLng(s.location.latitude, s.location.longitude),
         width: 45,
         height: 45,
         child: GestureDetector(
           onTap: () => _showServiceCard(context, s),
-          child: SizedBox(
-            width: 44,
-            height: 44,
-            child: Stack(
-              alignment: Alignment.topCenter,
-              children: [
-                // شكل الدبوس (Pin) الأساسي بلون نوع الخدمة
-                Icon(
-                  Icons.location_on,
-                  color: s.type.color,
-                  size: 44,
-                ),
-                // الأيقونة البيضاء الصغيرة الخاصة بنوع الخدمة، توضع بمنتصف الجزء الدائري العلوي من الدبوس
-                Positioned(
-                  top: 7,
-                  child: Icon(
-                    s.type.icon,
-                    color: Colors.white,
-                    size: 16,
+          child: Opacity(
+            opacity: isPending ? 0.55 : 1,
+            child: SizedBox(
+              width: 44,
+              height: 44,
+              child: Stack(
+                alignment: Alignment.topCenter,
+                children: [
+                  Icon(Icons.location_on, color: category.colorValue, size: 44),
+                  Positioned(
+                    top: 7,
+                    child: Icon(
+                      category.iconData,
+                      color: Colors.white,
+                      size: 16,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -62,12 +59,19 @@ class _MapScreenState extends State<MapScreen> {
     }).toList();
   }
 
-  // بطاقة تفاصيل الخدمة اللي بتطلع لما تدوس على أي ماركر عالخريطة
-  // مركزية بالشاشة، بحواف دائرية بكل الاتجاهات، متل التصميم المطلوب
   void _showServiceCard(BuildContext context, ServiceModel s) {
-    final bool isWorking = s.status == ServiceStatus.working;
-    final Color statusColor = isWorking ? const Color(0xFF2E9E5B) : const Color(0xFFE53935);
-    final String statusLabel = isWorking ? 'Working' : 'Not working';
+    final category = CategoryRepository.instance.byId(s.categoryId);
+    final me = AuthService.instance.currentUser.value;
+    final isAdmin = me?.isAdmin ?? false;
+    final isOwnPending =
+        me != null &&
+        s.createdBy == me.userId &&
+        s.status == ServiceStatus.pending;
+    final canDelete = isAdmin || isOwnPending;
+    final isApproved = s.status == ServiceStatus.approved;
+
+    final statusLabel = isApproved ? s.availability.label : s.status.label;
+    final statusColor = isApproved ? s.availability.color : s.status.color;
 
     showDialog(
       context: context,
@@ -81,96 +85,197 @@ class _MapScreenState extends State<MapScreen> {
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(20),
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 16, offset: const Offset(0, 6))],
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 16,
+                  offset: const Offset(0, 6),
+                ),
+              ],
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // صف علوي فيه زر حذف صغير وزر إغلاق البطاقة
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, color: Colors.red, size: 20),
-                      splashRadius: 20,
-                      onPressed: () {
-                        Navigator.pop(dialogContext); // اقفل البطاقة أولاً
-                        _confirmDelete(context, s);
-                      },
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.grey, size: 22),
-                      splashRadius: 20,
-                      onPressed: () => Navigator.pop(dialogContext),
-                    ),
-                  ],
-                ),
-                // دائرة الأيقونة الملونة بنفس نوع الخدمة
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: s.type.color),
-                  child: Icon(s.type.icon, color: Colors.white, size: 28),
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  s.name,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.darkNavy),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  s.type.label,
-                  style: TextStyle(fontSize: 14, color: s.type.color, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: statusColor.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    statusLabel,
-                    style: TextStyle(color: statusColor, fontWeight: FontWeight.w600, fontSize: 13),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                if (s.address.isNotEmpty)
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Icon(Icons.location_on, size: 16, color: Colors.grey),
-                      const SizedBox(width: 4),
-                      Flexible(
-                        child: Text(
-                          s.address,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                      canDelete
+                          ? IconButton(
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                color: Colors.red,
+                                size: 20,
+                              ),
+                              splashRadius: 20,
+                              onPressed: () {
+                                Navigator.pop(dialogContext);
+                                _confirmDelete(context, s, isAdmin);
+                              },
+                            )
+                          : const SizedBox(width: 48, height: 48),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.grey,
+                          size: 22,
                         ),
+                        splashRadius: 20,
+                        onPressed: () => Navigator.pop(dialogContext),
                       ),
                     ],
                   ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.pop(dialogContext); // اقفل البطاقة
-                      Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => ReportServiceScreen(initialService: s, showBackButton: true)),
-                      );
-                    },
-                    icon: const Icon(Icons.flag, color: Colors.white, size: 18),
-                    label: const Text('Report', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.primaryBlue,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  Container(
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: category.colorValue,
+                    ),
+                    child: Icon(
+                      category.iconData,
+                      color: Colors.white,
+                      size: 28,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 14),
+                  Text(
+                    s.serviceName,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.darkNavy,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    category.name,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: category.colorValue,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  StatusChip(label: statusLabel, color: statusColor),
+                  if (s.description.trim().isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      s.description,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                  ],
+                  if (s.status == ServiceStatus.rejected &&
+                      s.rejectionReason.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      'Reason: ${s.rejectionReason}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 12, color: Colors.red),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  if (s.location.address.isNotEmpty)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.location_on,
+                          size: 16,
+                          color: Colors.grey,
+                        ),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text(
+                            s.location.address,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Colors.grey.shade700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  const SizedBox(height: 20),
+                  if (isApproved || isOwnPending)
+                    Row(
+                      children: [
+                        if (isApproved)
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () {
+                                Navigator.pop(dialogContext);
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => ReportServiceScreen(
+                                      initialService: s,
+                                      showBackButton: true,
+                                    ),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(
+                                Icons.flag,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                              label: const Text(
+                                'Report',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.primaryBlue,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (isApproved && isOwnPending)
+                          const SizedBox(width: 10),
+                        if (isOwnPending)
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () {
+                                Navigator.pop(dialogContext);
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        AddServiceScreen(existing: s),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(Icons.edit, size: 18),
+                              label: const Text(
+                                'Edit',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                ],
+              ),
             ),
           ),
         );
@@ -178,25 +283,40 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // نافذة تأكيد قبل حذف الخدمة نهائياً، عشان نتجنب أي حذف بالغلط
-  void _confirmDelete(BuildContext context, ServiceModel s) {
+  void _confirmDelete(BuildContext context, ServiceModel s, bool asAdmin) {
     showDialog(
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
           title: const Text('Delete Service'),
-          content: Text('هل أنت متأكد أنك تريد حذف "${s.name}"؟'),
+          content: Text('هل أنت متأكد أنك تريد حذف "${s.serviceName}"؟'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
               child: const Text('إلغاء'),
             ),
             TextButton(
-              onPressed: () {
-                ServiceRepository.instance.removeService(s.id);
+              onPressed: () async {
                 Navigator.pop(dialogContext);
+                final repo = ServiceRepository.instance;
+                final ok = asAdmin
+                    ? await repo.removeService(s.serviceId)
+                    : await repo.deleteOwnService(s.serviceId);
+                if (!ok && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Could not delete this service.'),
+                    ),
+                  );
+                }
               },
-              child: const Text('حذف', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              child: const Text(
+                'حذف',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
           ],
         );
@@ -204,7 +324,6 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // نافذة تأكيد قبل تسجيل الخروج فعلياً
   void _confirmLogout(BuildContext context) {
     showDialog(
       context: context,
@@ -219,17 +338,21 @@ class _MapScreenState extends State<MapScreen> {
             ),
             TextButton(
               onPressed: () async {
-                Navigator.pop(dialogContext); // اقفل نافذة التأكيد أولاً
-                await FirebaseAuth.instance.signOut();
+                Navigator.pop(dialogContext);
+                await AuthService.instance.signOut();
                 if (!context.mounted) return;
-                // بنمسح كل الشاشات السابقة من الـ Stack ونوديه مباشرة لصفحة تسجيل الدخول
-                // عشان ما يقدر يرجع بزر الرجوع لشاشات كانت تحتاج تسجيل دخول
                 Navigator.of(context).pushAndRemoveUntil(
                   MaterialPageRoute(builder: (_) => const LoginScreen()),
-                      (route) => false,
+                  (route) => false,
                 );
               },
-              child: const Text('تسجيل الخروج', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              child: const Text(
+                'تسجيل الخروج',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
           ],
         );
@@ -246,31 +369,31 @@ class _MapScreenState extends State<MapScreen> {
           Expanded(
             child: Stack(
               children: [
-                ValueListenableBuilder<List<ServiceModel>>(
-                  valueListenable: ServiceRepository.instance.services,
-                  builder: (context, services, _) {
+                ListenableBuilder(
+                  listenable: Listenable.merge([
+                    ServiceRepository.instance.services,
+                    CategoryRepository.instance.categories,
+                  ]),
+                  builder: (context, _) {
+                    final services = ServiceRepository.instance.viewServices();
                     return FlutterMap(
                       mapController: _mapController,
                       options: MapOptions(
                         initialCenter: _gazaCenterPosition,
-                        initialZoom: 11.5, // مستوى زووم مثالي يوضح كامل قطاع غزة من رفح حتى بيت حانون
-                        minZoom: 4,        // أقل مستوى تصغير مسموح به
-                        maxZoom: 18,       // أعلى مستوى تكبير لرؤية الشوارع بدقة شديدة
-
-                        // تفعيل التكبير والتصغير عبر لمس الشاشة بالإصبعين أو النقر المزدوج
+                        initialZoom: 11.5,
+                        minZoom: 4,
+                        maxZoom: 18,
                         interactionOptions: const InteractionOptions(
-                          flags: InteractiveFlag.all, // تفعيل التكبير، التصغير، والتحريك بالكامل
+                          flags: InteractiveFlag.all,
                         ),
                       ),
                       children: [
-                        // هذا السيرفر الألماني السريع والمفتوح ممتاز جداً ومجاني لعرض تفاصيل الشوارع العربية
                         TileLayer(
-                          urlTemplate: 'https://{s}.tile.openstreetmap.de/{z}/{x}/{y}.png',
+                          urlTemplate:
+                              'https://{s}.tile.openstreetmap.de/{z}/{x}/{y}.png',
                           userAgentPackageName: 'com.example.mapping',
                         ),
-                        MarkerLayer(
-                          markers: _buildMarkers(services),
-                        ),
+                        MarkerLayer(markers: _buildMarkers(services)),
                       ],
                     );
                   },
@@ -281,7 +404,7 @@ class _MapScreenState extends State<MapScreen> {
                   child: _circleButton(
                     icon: Icons.filter_list,
                     onTap: () {
-                      // TODO: افتح نافذة تصفية أنواع الخدمات
+                      // TODO: نافذة تصفية حسب الفئة
                     },
                   ),
                 ),
@@ -290,10 +413,7 @@ class _MapScreenState extends State<MapScreen> {
                   right: 16,
                   child: _circleButton(
                     icon: Icons.my_location,
-                    onTap: () {
-                      // العودة لمركز قطاع غزة عند الضغط على زر الموقع
-                      _mapController.move(_gazaCenterPosition, 11.5);
-                    },
+                    onTap: () => _mapController.move(_gazaCenterPosition, 11.5),
                   ),
                 ),
                 Positioned(
@@ -303,7 +423,9 @@ class _MapScreenState extends State<MapScreen> {
                     backgroundColor: AppColors.primaryBlue,
                     onPressed: () {
                       Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const AddServiceScreen()),
+                        MaterialPageRoute(
+                          builder: (_) => const AddServiceScreen(),
+                        ),
                       );
                     },
                     child: const Icon(Icons.add, size: 32),
@@ -347,10 +469,18 @@ class _MapScreenState extends State<MapScreen> {
             const Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('HSG',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
-                Text('Humanitarian Services Guide',
-                    style: TextStyle(color: Colors.white70, fontSize: 11)),
+                Text(
+                  'HSG',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+                Text(
+                  'Humanitarian Services Guide',
+                  style: TextStyle(color: Colors.white70, fontSize: 11),
+                ),
               ],
             ),
             const Spacer(),

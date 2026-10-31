@@ -1,6 +1,11 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import '../models/location_model.dart';
 import '../models/service_model.dart';
+import 'auth_service.dart';
+import 'category_repository.dart';
 
 class ServiceRepository {
   ServiceRepository._() {
@@ -8,75 +13,226 @@ class ServiceRepository {
   }
   static final ServiceRepository instance = ServiceRepository._();
 
-  final CollectionReference<Map<String, dynamic>> _servicesCollection =
-  FirebaseFirestore.instance.collection('services');
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  CollectionReference<Map<String, dynamic>> get _col =>
+      _db.collection('services');
 
-  // نفس الـ ValueNotifier القديم بالضبط اللي كانت كل الشاشات (الخريطة، التقارير...) تستمع له
-  // بس هلأ بينحدث تلقائياً كل ما تتغيّر البيانات على Firestore، بدل ما يكون مصدر البيانات الوحيد
-  // هيك كل الشاشات تضل شغالة زي ما هي بدون أي تعديل عليها
+  /// كل الخدمات (بدون فلترة). الشاشات بتستخدم viewServices() للفلترة حسب الصلاحية
   final ValueNotifier<List<ServiceModel>> services = ValueNotifier([]);
 
-  Future<void> _init() async {
-    // أول مرة يفتح فيها التطبيق: نتحقق مرة وحدة بس إذا القائمة فاضية على Firestore
-    // (يعني ولا خدمة انضافت أو انحذفت قبل هيك)، ولو فاضية نزرع بيانات تجريبية أولية
-    final snapshot = await _servicesCollection.get();
-    if (snapshot.docs.isEmpty) {
-      await _seedInitialData();
-    }
+  StreamSubscription? _sub;
 
-    // بعدين منبلش نستمع لأي تغيير حي (Realtime) عالمجموعة، ونحدث الـ ValueNotifier تلقائياً
-    _servicesCollection.snapshots().listen((snapshot) {
-      services.value = snapshot.docs
-          .map((doc) => ServiceModel.fromMap(doc.id, doc.data()))
-          .toList();
+  String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
+  bool get _isAdmin => AuthService.instance.currentUser.value?.isAdmin ?? false;
+
+  void _init() {
+    FirebaseAuth.instance.authStateChanges().listen((user) async {
+      await _sub?.cancel();
+      _sub = null;
+
+      if (user == null) {
+        services.value = [];
+        return;
+      }
+
+      await _seedIfEmpty();
+
+      _sub = _col.snapshots().listen((snap) {
+        services.value = snap.docs
+            .map((d) => ServiceModel.fromMap(d.id, d.data()))
+            .toList();
+      }, onError: (e) => debugPrint('ServiceRepository error: $e'));
     });
   }
 
-  Future<void> _seedInitialData() async {
-    final batch = FirebaseFirestore.instance.batch();
-    final seedServices = [
-      ServiceModel(
-        id: '1',
-        name: 'Al Shifa Medical Point',
-        type: ServiceType.medical,
-        status: ServiceStatus.working,
-        latitude: 31.5017,
-        longitude: 34.4668,
-        address: 'Al-Shifa Street, Gaza',
-      ),
-      ServiceModel(
-        id: '2',
-        name: 'Water Station 1',
-        type: ServiceType.water,
-        status: ServiceStatus.working,
-        latitude: 31.5030,
-        longitude: 34.4650,
-        address: 'Al-Nasr Street, Gaza',
-      ),
-      ServiceModel(
-        id: '3',
-        name: 'Community Kitchen',
-        type: ServiceType.food,
-        status: ServiceStatus.working,
-        latitude: 31.4990,
-        longitude: 34.4720,
-        address: 'Omar Al-Mukhtar Street, Gaza',
-      ),
-    ];
-    for (final s in seedServices) {
-      batch.set(_servicesCollection.doc(s.id), s.toMap());
+  Future<void> _seedIfEmpty() async {
+    try {
+      final snap = await _col.limit(1).get();
+      if (snap.docs.isNotEmpty) return;
+
+      final batch = _db.batch();
+      final seeds = [
+        ServiceModel(
+          serviceId: '1',
+          serviceName: 'Al Shifa Medical Point',
+          status: ServiceStatus.approved,
+          createdBy: 'system',
+          categoryId: 'medical',
+          location: const LocationModel(
+            locationId: '1_loc',
+            latitude: 31.5017,
+            longitude: 34.4668,
+            address: 'Al-Shifa Street, Gaza',
+          ),
+        ),
+        ServiceModel(
+          serviceId: '2',
+          serviceName: 'Water Station 1',
+          status: ServiceStatus.approved,
+          createdBy: 'system',
+          categoryId: 'water',
+          location: const LocationModel(
+            locationId: '2_loc',
+            latitude: 31.5030,
+            longitude: 34.4650,
+            address: 'Al-Nasr Street, Gaza',
+          ),
+        ),
+        ServiceModel(
+          serviceId: '3',
+          serviceName: 'Community Kitchen',
+          status: ServiceStatus.approved,
+          createdBy: 'system',
+          categoryId: 'food',
+          location: const LocationModel(
+            locationId: '3_loc',
+            latitude: 31.4990,
+            longitude: 34.4720,
+            address: 'Omar Al-Mukhtar Street, Gaza',
+          ),
+        ),
+      ];
+      for (final s in seeds) {
+        batch.set(_col.doc(s.serviceId), s.toMap());
+      }
+      await batch.commit();
+    } catch (e) {
+      debugPrint('ServiceRepository seed failed: $e');
     }
-    await batch.commit();
   }
 
-  // إضافة خدمة جديدة: بنكتبها مباشرة كمستند جديد على Firestore
-  // الـ ValueNotifier بيتحدث تلقائياً بعدها بفضل الاستماع الحي (listen) يلي فوق، بدون ما نضطر نحدثه يدوياً هون
-  Future<void> addService(ServiceModel service) async {
-    await _servicesCollection.doc(service.id).set(service.toMap());
+  // ───────────── User ─────────────
+
+  /// viewServices() من الداياجرام: الخدمات الموافق عليها + خدمات المستخدم نفسه
+  List<ServiceModel> viewServices({String keyword = ''}) {
+    final uid = _uid;
+    final q = keyword.trim().toLowerCase();
+
+    return services.value.where((s) {
+      final visible = s.status == ServiceStatus.approved || s.createdBy == uid;
+      if (!visible) return false;
+      if (q.isEmpty) return true;
+
+      final categoryName = CategoryRepository.instance
+          .byId(s.categoryId)
+          .name
+          .toLowerCase();
+      return s.serviceName.toLowerCase().contains(q) ||
+          s.description.toLowerCase().contains(q) ||
+          s.location.address.toLowerCase().contains(q) ||
+          categoryName.contains(q);
+    }).toList();
   }
 
-  // حذف خدمة: بنمسح المستند مباشرة من Firestore بالاعتماد على الـ id
-  Future<void> removeService(String id) async {
-    await _servicesCollection.doc(id).delete();
+  /// searchServices(keyword) من الداياجرام
+  List<ServiceModel> searchServices(String keyword) =>
+      viewServices(keyword: keyword);
+
+  /// addService(service) من الداياجرام
+  Future<bool> addService(ServiceModel service) async {
+    try {
+      await _col.doc(service.serviceId).set(service.toMap());
+      return true;
+    } catch (e) {
+      debugPrint('addService failed: $e');
+      return false;
+    }
+  }
+
+  /// editOwnService(serviceId, data): فقط خدمات المستخدم وهي Pending
+  Future<bool> editOwnService(
+    String serviceId,
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final doc = await _col.doc(serviceId).get();
+      final raw = doc.data();
+      if (raw == null) return false;
+
+      final service = ServiceModel.fromMap(doc.id, raw);
+      if (service.createdBy != _uid ||
+          service.status != ServiceStatus.pending) {
+        return false;
+      }
+
+      await _col.doc(serviceId).update({...data, 'updatedAt': Timestamp.now()});
+      return true;
+    } catch (e) {
+      debugPrint('editOwnService failed: $e');
+      return false;
+    }
+  }
+
+  /// deleteOwnService(serviceId): فقط خدمات المستخدم وهي Pending
+  Future<bool> deleteOwnService(String serviceId) async {
+    try {
+      final doc = await _col.doc(serviceId).get();
+      final raw = doc.data();
+      if (raw == null) return false;
+
+      final service = ServiceModel.fromMap(doc.id, raw);
+      if (service.createdBy != _uid ||
+          service.status != ServiceStatus.pending) {
+        return false;
+      }
+
+      await _col.doc(serviceId).delete();
+      return true;
+    } catch (e) {
+      debugPrint('deleteOwnService failed: $e');
+      return false;
+    }
+  }
+
+  // ───────────── Admin ─────────────
+
+  /// reviewServices(): كل الخدمات، الـ Pending أولاً
+  List<ServiceModel> reviewServices() {
+    final list = [...services.value];
+    list.sort((a, b) {
+      final aPending = a.status == ServiceStatus.pending;
+      final bPending = b.status == ServiceStatus.pending;
+      if (aPending && !bPending) return -1;
+      if (!aPending && bPending) return 1;
+      return b.createdAt.compareTo(a.createdAt);
+    });
+    return list;
+  }
+
+  /// updateStatus(status) من الداياجرام (Service)
+  Future<bool> updateStatus(
+    String serviceId,
+    ServiceStatus status, {
+    String reason = '',
+  }) async {
+    if (!_isAdmin) return false;
+    try {
+      await _col.doc(serviceId).update({
+        'status': status.name,
+        'rejectionReason': status == ServiceStatus.rejected ? reason : '',
+        'updatedAt': Timestamp.now(),
+      });
+      return true;
+    } catch (e) {
+      debugPrint('updateStatus failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> approveService(String serviceId) =>
+      updateStatus(serviceId, ServiceStatus.approved);
+
+  Future<bool> rejectService(String serviceId, String reason) =>
+      updateStatus(serviceId, ServiceStatus.rejected, reason: reason);
+
+  Future<bool> removeService(String serviceId) async {
+    if (!_isAdmin) return false;
+    try {
+      await _col.doc(serviceId).delete();
+      return true;
+    } catch (e) {
+      debugPrint('removeService failed: $e');
+      return false;
+    }
   }
 }

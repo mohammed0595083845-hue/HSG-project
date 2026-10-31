@@ -1,8 +1,8 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import '../theme/app_colors.dart';
+import '../data/auth_service.dart';
 import 'login_screen.dart';
 
 class SignUpScreen extends StatefulWidget {
@@ -31,8 +31,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
     super.initState();
     _loginTapRecognizer = TapGestureRecognizer()
       ..onTap = () {
-        // بنستخدم pushReplacement بدل push عشان ما تضل صفحة Sign Up متراكمة بالـ Stack
-        // فلو ضغط المستخدم "رجوع" من صفحة تسجيل الدخول، يرجعله عالصفحة يلي قبل Sign Up (مش لصفحة Sign Up نفسها)
+        // pushReplacement عشان ما تضل صفحة Sign Up متراكمة بالـ Stack
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const LoginScreen()),
         );
@@ -49,81 +48,68 @@ class _SignUpScreenState extends State<SignUpScreen> {
     super.dispose();
   }
 
-  // تحقق بسيط من الحقول، وبعدها إنشاء حساب حقيقي على Firebase Authentication
+  void _showMessage(String message, {Color? color}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: color),
+    );
+  }
+
+  // تحقق من الحقول، وبعدها signUp() من الداياجرام عبر AuthService
   Future<void> _handleSignUp() async {
     final fullName = _fullNameController.text.trim();
     final email = _emailController.text.trim();
     final password = _passwordController.text;
     final confirmPassword = _confirmPasswordController.text;
 
-    if (fullName.isEmpty || email.isEmpty || password.isEmpty || confirmPassword.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in all fields.')),
-      );
+    if (fullName.isEmpty ||
+        email.isEmpty ||
+        password.isEmpty ||
+        confirmPassword.isEmpty) {
+      _showMessage('Please fill in all fields.');
       return;
     }
 
     if (!email.contains('@') || !email.contains('.')) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a valid email address.')),
-      );
+      _showMessage('Please enter a valid email address.');
       return;
     }
 
     if (password.length < 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Password must be at least 6 characters.')),
-      );
+      _showMessage('Password must be at least 6 characters.');
       return;
     }
 
     if (password != confirmPassword) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Passwords do not match.')),
-      );
+      _showMessage('Passwords do not match.');
       return;
     }
 
     if (!_agreeToTerms) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please agree to the Terms & Conditions.')),
-      );
+      _showMessage('Please agree to the Terms & Conditions.');
       return;
     }
 
     setState(() => _isLoading = true);
 
     try {
-      // بننشئ الحساب فعلياً على Firebase Authentication بالإيميل وكلمة السر
-      final credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+      // بينشئ الحساب على Firebase Authentication، وبيخزّن مستند المستخدم
+      // (fullName, email, role = user, createdAt) بمجموعة "users" على Firestore
+      await AuthService.instance.signUp(
+        fullName: fullName,
         email: email,
         password: password,
       );
 
-      // بنحفظ الاسم الكامل مع الحساب (يظهر بالكونسول وبأي مكان بنستخدم فيه اسم المستخدم لاحقاً)
-      await credential.user?.updateDisplayName(fullName);
-
-      // بنخزّن كمان نسخة من بيانات المستخدم بمجموعة "users" على Firestore
-      // عشان نقدر نشوف قائمة واضحة بكل المستخدمين (بالاسم والإيميل) بنفس مكان services و reports
-      // بنستخدم الـ uid تبع المستخدم كمعرف للمستند، عشان يضل مرتبط بحسابه بشكل دائم
-      final uid = credential.user?.uid;
-      if (uid != null) {
-        await FirebaseFirestore.instance.collection('users').doc(uid).set({
-          'fullName': fullName,
-          'email': email,
-          'createdAt': Timestamp.now(),
-        });
-      }
-
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Account created successfully! Please log in.'), backgroundColor: Colors.green),
+      _showMessage(
+        'Account created successfully! Please log in.',
+        color: Colors.green,
       );
 
-      // بعد نجاح إنشاء الحساب، منسجل خروج فوراً (Firebase بيسجل دخول تلقائي بعد الإنشاء)
-      // عشان نضمن المستخدم يسجل دخول يدوياً من صفحة Login زي ما هو مطلوب بالتصميم
-      await FirebaseAuth.instance.signOut();
+      // Firebase بيسجل دخول تلقائي بعد الإنشاء، فمنسجل خروج
+      // عشان المستخدم يدخل يدوياً من صفحة Login زي التصميم
+      await AuthService.instance.signOut();
 
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
@@ -141,18 +127,15 @@ class _SignUpScreenState extends State<SignUpScreen> {
         case 'weak-password':
           message = 'Password is too weak. Please choose a stronger one.';
           break;
+        case 'network-request-failed':
+          message = 'No internet connection. Please try again.';
+          break;
         default:
           message = 'Sign up failed. Please try again.';
       }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
-      }
+      if (mounted) _showMessage(message);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Something went wrong. Please try again.')),
-        );
-      }
+      if (mounted) _showMessage('Something went wrong. Please try again.');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -246,7 +229,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                   ),
                   onPressed: () {
                     setState(
-                          () => _obscureConfirmPassword = !_obscureConfirmPassword,
+                      () => _obscureConfirmPassword = !_obscureConfirmPassword,
                     );
                   },
                 ),
@@ -268,16 +251,16 @@ class _SignUpScreenState extends State<SignUpScreen> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: RichText(
-                      text: TextSpan(
-                        style: const TextStyle(
+                      text: const TextSpan(
+                        style: TextStyle(
                           color: AppColors.textDark,
                           fontSize: 13,
                         ),
                         children: [
-                          const TextSpan(text: 'I agree to the '),
+                          TextSpan(text: 'I agree to the '),
                           TextSpan(
                             text: 'Terms & Conditions',
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: AppColors.primaryBlue,
                               fontWeight: FontWeight.w600,
                             ),
@@ -302,21 +285,21 @@ class _SignUpScreenState extends State<SignUpScreen> {
                   ),
                   child: _isLoading
                       ? const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.white,
-                    ),
-                  )
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.5,
+                            color: Colors.white,
+                          ),
+                        )
                       : const Text(
-                    'Sign Up',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
+                          'Sign Up',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white,
+                          ),
+                        ),
                 ),
               ),
               const SizedBox(height: 16),
@@ -332,7 +315,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           color: AppColors.primaryBlue,
                           fontWeight: FontWeight.w600,
                         ),
-                        // هون بنربط الضغطة بالتنقل لصفحة تسجيل الدخول
                         recognizer: _loginTapRecognizer,
                       ),
                     ],
@@ -376,47 +358,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
           borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: AppColors.primaryBlue),
         ),
-      ),
-    );
-  }
-
-  Widget buildLogo({double size = 100}) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          Icon(Icons.favorite, color: AppColors.darkNavy, size: size),
-          Icon(Icons.favorite, color: Colors.white, size: size * 0.55),
-          Positioned(
-            top: 0,
-            left: size * 0.15,
-            child: Icon(
-              Icons.add,
-              color: AppColors.accentRed,
-              size: size * 0.28,
-            ),
-          ),
-          Positioned(
-            top: size * 0.05,
-            right: 0,
-            child: Icon(
-              Icons.wifi,
-              color: AppColors.primaryBlue,
-              size: size * 0.3,
-            ),
-          ),
-          Positioned(
-            bottom: size * 0.22,
-            left: size * 0.22,
-            child: Icon(
-              Icons.water_drop,
-              color: AppColors.accentGreen,
-              size: size * 0.22,
-            ),
-          ),
-        ],
       ),
     );
   }
